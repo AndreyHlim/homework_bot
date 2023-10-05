@@ -8,9 +8,12 @@ import requests
 import telegram
 from dotenv import load_dotenv
 
+from exceptions import CustomConnectError
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-log_format = '%(asctime)s [%(levelname)s] %(message)s'
+log_format = ('%(asctime)s [%(levelname)s] - Function::'
+              '%(funcName)s (line %(lineno)s):: %(message)s')
 log_formatter = logging.Formatter(log_format)
 stream_handler = logging.StreamHandler(sys.stdout)
 stream_handler.setFormatter(log_formatter)
@@ -34,10 +37,7 @@ HOMEWORK_VERDICTS = {
 
 def check_tokens() -> bool:
     """Проверяет доступность переменных окружения."""
-    if None not in (PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID):
-        return True
-    logger.critical('Отсутствие обязательных переменных'
-                    'окружения во время запуска бота')
+    return all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID])
 
 
 def send_message(bot: telegram.bot.Bot, message: str):
@@ -46,7 +46,8 @@ def send_message(bot: telegram.bot.Bot, message: str):
         bot.send_message(TELEGRAM_CHAT_ID, message)
         logger.debug(f'Сообщение отправлено в Telegram: {message}')
     except Exception as error:
-        logger.error(f'Сбой при отправке сообщения в Telegram. {error}')
+        logger.error('Сбой при отправке сообщения в Telegram. '
+                     f'Ошибка: {error}; Сообщение: {message}')
 
 
 def get_api_answer(timestamp: int) -> dict:
@@ -55,36 +56,38 @@ def get_api_answer(timestamp: int) -> dict:
         homeworks = requests.get(
             ENDPOINT, headers=HEADERS, params={'from_date': timestamp}
         )
-    except requests.RequestException():
-        pass
+    except requests.RequestException:
+        raise CustomConnectError()
     if homeworks.status_code != HTTPStatus.OK:
-        raise requests.HTTPError('Сервис Практикум.Домашка не отвечает.')
+        raise CustomConnectError('Сервис Практикум.Домашка не отвечает.')
     return homeworks.json()
 
 
-def check_response(response: dict) -> bool:
+def check_response(response: dict):
     """Проверяет ответ API на соответствие документации Практикум.Домашка."""
-    if type(response) != dict:
+    if not isinstance(response, dict):
         raise TypeError('В функцию check_response '
                         'вместо словаря передан другой тип данных')
-    if type(response.get('homeworks')) != list:
+    if not isinstance(response.get('homeworks'), list):
         raise TypeError('В ответе API значение ключа '
                         'homeworks должно являться списком')
-    expected_keys = {'homeworks', 'current_date'}
-    if not expected_keys.issubset(response.keys()):
-        raise KeyError('Ожидаемые ключи {} или {} отсутствуют '
-                       'в ответе API'.format(*expected_keys))
-    if response.get('homeworks'):
-        return True
-    logger.debug('Новые статусы отсутствуют.')
+    if 'homeworks' not in response:
+        raise KeyError('Ожидаемый ключ homeworks отсутствует в ответе API')
+    if 'current_date' not in response:
+        raise KeyError('Ожидаемый ключ current_date отсутствует в ответе API')
 
 
 def parse_status(homework: dict) -> str:
-    """Извлекает статус конерктной домашней работы."""
-    homework_name = homework.get('homework_name')
-    if homework_name is None:
+    """Извлекает статус конкретной домашней работы."""
+    if 'homework_name' not in homework:
         raise KeyError('Ключа homework_name не найдено.')
-    verdict = HOMEWORK_VERDICTS.get(homework.get('status'))
+    homework_name = homework.get('homework_name')
+
+    if 'status' not in homework:
+        raise KeyError('Ключа status не найдено.')
+    homework_status = homework.get('status')
+
+    verdict = HOMEWORK_VERDICTS.get(homework_status)
     if verdict is None:
         raise ValueError('Непредвиденный статус домашней работы.')
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
@@ -93,25 +96,36 @@ def parse_status(homework: dict) -> str:
 def main():
     """Работа чат-бота Telegramm по проверке статуса Практикум.Домашка."""
     last_error_message_telegram = ""
-    while True:
-        if not check_tokens():
-            sys.exit()
+    last_message_telegram = ""
 
+    if not check_tokens():
+        logger.critical('Отсутствие обязательных переменных'
+                        'окружения во время запуска бота')
+        sys.exit(1)
+
+    bot = telegram.Bot(token=TELEGRAM_TOKEN)
+    timestamp = int(time.time()) - RETRY_PERIOD
+
+    while True:
         try:
-            bot = telegram.Bot(token=TELEGRAM_TOKEN)
-            timestamp = int(time.time())
-            homework = get_api_answer(timestamp - RETRY_PERIOD)
-            if check_response(homework):
+            homework = get_api_answer(timestamp)
+            check_response(homework)
+            if homework.get('homeworks'):
                 message = parse_status(homework.get('homeworks')[0])
-                send_message(bot, message)
+                timestamp = homework.get('current_date')
+                if last_message_telegram != message:
+                    send_message(bot, message)
+                    last_error_message_telegram = ""
+            else:
+                logger.debug('Новые статусы работ отсутствуют.')
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
             logger.error(message)
             if last_error_message_telegram != message:
                 send_message(bot, message)
                 last_error_message_telegram = message
-
-        time.sleep(RETRY_PERIOD)
+        finally:
+            time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
