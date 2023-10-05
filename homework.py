@@ -8,8 +8,6 @@ import requests
 import telegram
 from dotenv import load_dotenv
 
-from exceptions import CustomConnectError
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 log_format = ('%(asctime)s [%(levelname)s] - Function::'
@@ -40,7 +38,7 @@ def check_tokens() -> bool:
     return all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID])
 
 
-def send_message(bot: telegram.bot.Bot, message: str):
+def send_message(bot: telegram.bot.Bot, message: str) -> None:
     """Отправляет сообщение в Telegram чат."""
     try:
         bot.send_message(TELEGRAM_CHAT_ID, message)
@@ -57,22 +55,24 @@ def get_api_answer(timestamp: int) -> dict:
             ENDPOINT, headers=HEADERS, params={'from_date': timestamp}
         )
     except requests.RequestException:
-        raise CustomConnectError()
+        raise ConnectionError('Не удалось выполнить запрос '
+                              'к Практикум.Домашка')
     if homeworks.status_code != HTTPStatus.OK:
-        raise CustomConnectError('Сервис Практикум.Домашка не отвечает.')
+        raise ConnectionError('Сервис Практикум.Домашка не отвечает. '
+                              f'Статус: {homeworks.status_code}')
     return homeworks.json()
 
 
-def check_response(response: dict):
+def check_response(response: dict) -> None:
     """Проверяет ответ API на соответствие документации Практикум.Домашка."""
     if not isinstance(response, dict):
         raise TypeError('В функцию check_response '
                         'вместо словаря передан другой тип данных')
+    if 'homeworks' not in response:
+        raise KeyError('Ожидаемый ключ homeworks отсутствует в ответе API')
     if not isinstance(response.get('homeworks'), list):
         raise TypeError('В ответе API значение ключа '
                         'homeworks должно являться списком')
-    if 'homeworks' not in response:
-        raise KeyError('Ожидаемый ключ homeworks отсутствует в ответе API')
     if 'current_date' not in response:
         raise KeyError('Ожидаемый ключ current_date отсутствует в ответе API')
 
@@ -89,19 +89,20 @@ def parse_status(homework: dict) -> str:
 
     verdict = HOMEWORK_VERDICTS.get(homework_status)
     if verdict is None:
-        raise ValueError('Непредвиденный статус домашней работы.')
+        raise ValueError('Непредвиденный статус '
+                         f'домашней работы: {homework_status}')
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def main():
     """Работа чат-бота Telegramm по проверке статуса Практикум.Домашка."""
-    last_error_message_telegram = ""
-    last_message_telegram = ""
-
     if not check_tokens():
         logger.critical('Отсутствие обязательных переменных'
                         'окружения во время запуска бота')
         sys.exit(1)
+
+    last_error_message_telegram = ""
+    last_message_telegram = ""
 
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time()) - RETRY_PERIOD
@@ -110,9 +111,9 @@ def main():
         try:
             homework = get_api_answer(timestamp)
             check_response(homework)
+            timestamp = homework.get('current_date')
             if homework.get('homeworks'):
                 message = parse_status(homework.get('homeworks')[0])
-                timestamp = homework.get('current_date')
                 if last_message_telegram != message:
                     send_message(bot, message)
                     last_error_message_telegram = ""
