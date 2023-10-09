@@ -87,8 +87,7 @@ def parse_status(homework: dict) -> str:
         raise KeyError('Ключа status не найдено.')
     homework_status = homework.get('status')
 
-    verdict = HOMEWORK_VERDICTS.get(homework_status)
-    if verdict is None:
+    if (verdict := HOMEWORK_VERDICTS.get(homework_status)) is None:
         raise ValueError('Непредвиденный статус '
                          f'домашней работы: {homework_status}')
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
@@ -109,19 +108,16 @@ def main():
 
     while True:
         try:
-            homework = get_api_answer(timestamp)
-            check_response(homework)
-            timestamp = homework.get('current_date')
-            if homework.get('homeworks'):
-                message = parse_status(homework.get('homeworks')[0])
-                if last_message_telegram != message:
+            check_response(homework := get_api_answer(timestamp))
+            timestamp = homework['current_date']
+            if (work := homework.get('homeworks')):
+                if last_message_telegram != (message := parse_status(work[0])):
                     send_message(bot, message)
                     last_error_message_telegram = ""
             else:
                 logger.debug('Новые статусы работ отсутствуют.')
         except Exception as error:
-            message = f'Сбой в работе программы: {error}'
-            logger.error(message)
+            logger.error(message := f'Сбой в работе программы: {error}')
             if last_error_message_telegram != message:
                 send_message(bot, message)
                 last_error_message_telegram = message
